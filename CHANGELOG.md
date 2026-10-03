@@ -17,6 +17,9 @@ conventions and [Semantic Versioning](https://semver.org/).
   `Area_km2` for already-processed dams.
 - Overwrite mode for reruns: `--overwrite` flag, or a Yes/No prompt in dialog mode
   when results already exist; recomputes every dam and removes stale per-dam files.
+- Delineation now runs through pourpoint's staged API; the pre-merge sub-basins
+  are saved per dam (`<name>_subbasins_pourpoint/<Dam_ID>_SubBasins.gpkg`, plus a
+  merged file) before `dissolve()` produces the watershed.
 - Closest-feature (`distance-first`) outlet snapping.
 - mnema memory scaffolding: per-project store at `Resources/.mnema`, plus
   `doctrine` and `library` read-only vaults. See `CLAUDE.md` → "Memory

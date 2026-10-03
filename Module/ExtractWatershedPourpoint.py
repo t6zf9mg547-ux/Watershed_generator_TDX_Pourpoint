@@ -5,6 +5,9 @@ For each dam in the input CSV, delineates the upstream watershed with the
 pourpoint engine against the remote TDX-Hydro HFX dataset on S3 (Hetzner
 object storage). pourpoint snaps the outlet to the dataset's declared snap
 features, traverses the upstream graph and returns the dissolved watershed.
+The delineation runs through pourpoint's staged API (select_level →
+resolve_outlet → traverse → pre_merge_units → refine → dissolve →
+compose_result) so the whole sub-basins can be saved BEFORE they are merged.
 
 This dataset has NO D8 raster auxiliary, so refinement is disabled: the
 result is always the whole terminal drainage unit plus every upstream unit
@@ -12,16 +15,20 @@ result is always the whole terminal drainage unit plus every upstream unit
 
 Outputs
 -------
-  1. Watershed polygon per dam, saved as GeoPackage (its outline is the
-     watershed boundary line).
-  2. Upstream river network per dam — every TDX-Hydro stream reach in the
+  1. Sub-basins per dam — the whole drainage-unit polygons from the staged
+     pre-merge step, saved as GeoPackage before the merge. Columns: unit_id,
+     area_km2, up_area_km2 (the unit's inclusive upstream area), is_terminal.
+  2. Watershed polygon per dam, saved as GeoPackage (its outline is the
+     watershed boundary line); the dissolve of the sub-basins.
+  3. Upstream river network per dam — every TDX-Hydro stream reach in the
      watershed (outlet reach included), saved as GeoPackage. Taken from the
      dataset's native "stems" snap layer, filtered to the watershed's
      upstream unit IDs; 'drain_km2' is the reach's inclusive drainage area.
-  3. Merged GeoPackages combining every per-dam file (rebuilt at the end of
-     each run): <input_filename>_watershed_merged.gpkg and
+  4. Merged GeoPackages combining every per-dam file (rebuilt at the end of
+     each run): <input_filename>_subbasins_merged.gpkg,
+     <input_filename>_watershed_merged.gpkg and
      <input_filename>_river_network_merged.gpkg, with a Dam_ID column.
-  4. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
+  5. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
      Existing values are left untouched so results from multiple datasets
      can be compared side by side in the same CSV.
 
@@ -41,9 +48,11 @@ Output
 ------
 CSV         : Output/<input_filename>_Pourpoint.csv
 Diagnostics : Output/<input_filename>_Pourpoint_diagnostics.csv
-GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
+GPKG        : Plot/<input_filename>_subbasins_pourpoint/<Dam_ID>_SubBasins.gpkg
+              Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
               Plot/<input_filename>_river_network_pourpoint/<Dam_ID>_RiverNetwork.gpkg
-              <same folders>/<input_filename>_watershed_merged.gpkg and
+              <same folders>/<input_filename>_subbasins_merged.gpkg,
+              <input_filename>_watershed_merged.gpkg and
               <input_filename>_river_network_merged.gpkg
 
 Re-running
@@ -51,15 +60,15 @@ Re-running
 By default dams that already have results are skipped (and their Area_km2
 is read back into the output CSV). --overwrite (or answering Yes to the
 dialog prompt) recomputes every dam, replacing the output CSV, diagnostics,
-per-dam GPKGs and merged GPKGs. A dam that fails on an overwrite run has its
+per-dam GPKGs (sub-basins, watershed, river network) and merged GPKGs. A dam that fails on an overwrite run has its
 old per-dam files removed so stale results never reach the merged files.
 
 Single-point test (no CSV, no dialogs)
 --------------------------------------
 uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M] [--overwrite]
 uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
-Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson
-and Plot/test_river_network_pourpoint.geojson
+Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson,
+Plot/test_subbasins_pourpoint.geojson and Plot/test_river_network_pourpoint.geojson
 """
 
 import argparse
@@ -76,6 +85,7 @@ import pandas as pd
 import pourpoint
 import shapely
 from botocore.exceptions import ProfileNotFound
+from pyproj import Geod
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -146,6 +156,32 @@ def _dam_id_safe(dam_id):
     return str(dam_id).replace("/", "_").replace("\\", "_").replace(":", "_")
 
 
+def delineate_staged(engine, lat, lon):
+    """Run the staged pipeline; return (result, sub-basins GeoDataFrame).
+
+    The sub-basins are the whole pre-merge drainage units (staged step 4),
+    captured before dissolve() merges them into the watershed.
+    """
+    level = engine.select_level(selection=pourpoint.LevelSelection.FINEST)
+    outlet = engine.resolve_outlet(level, lat=lat, lon=lon)
+    upstream = engine.traverse(outlet)
+    units = engine.pre_merge_units(upstream)
+    refinement = engine.refine(outlet, units)  # status 'disabled' (refine=False)
+    dissolved = engine.dissolve(units, refinement)
+    result = engine.compose_result(outlet, upstream, units, refinement, dissolved)
+    subbasins = gpd.GeoDataFrame(
+        {
+            "unit_id": [u.id for u in units.units],
+            "area_km2": [u.area_km2 for u in units.units],
+            "up_area_km2": [u.up_area_km2 for u in units.units],
+            "is_terminal": [u.id == units.terminal_unit_id for u in units.units],
+        },
+        geometry=[shapely.from_wkb(w) for w in units.unit_geometry_wkb],
+        crs="EPSG:4326",
+    )
+    return result, subbasins
+
+
 def upstream_river_network(engine, result):
     """Stream reaches of the result's watershed, from the dataset's snap layer."""
     targets = engine.snap_targets(bbox=result.geometry_bbox).to_geodataframe()
@@ -178,7 +214,7 @@ def run_test(lat, lon, radius_m):
     configure_s3()
     engine = open_engine(radius_m)
     t0 = time.monotonic()
-    result = engine.delineate(lat=lat, lon=lon)
+    result, subbasins = delineate_staged(engine, lat, lon)
     print(f"Delineated in {time.monotonic() - t0:.1f} s")
     print(f" area_km2          : {result.area_km2:.2f}")
     print(f" terminal_unit_id  : {result.terminal_unit_id}")
@@ -191,6 +227,13 @@ def run_test(lat, lon, radius_m):
     out = PLOT_DIR / "test_watershed_pourpoint.geojson"
     out.write_text(result.to_geojson(), encoding="utf-8")
     print(f" → saved {out}")
+    out = PLOT_DIR / "test_subbasins_pourpoint.geojson"
+    subbasins.to_file(out, driver="GeoJSON")
+    print(f" → saved {out} ({len(subbasins)} sub-basins)")
+    diff = subbasins.union_all().symmetric_difference(shapely.from_wkb(result.geometry_wkb))
+    diff_km2 = abs(Geod(ellps="WGS84").geometry_area_perimeter(diff)[0]) / 1e6
+    print(f" sub-basin union vs watershed: {diff_km2:.4f} km² difference "
+          f"(dissolve fills sliver gaps between sub-basins)")
     network = upstream_river_network(engine, result)
     out = PLOT_DIR / "test_river_network_pourpoint.geojson"
     network.to_file(out, driver="GeoJSON")
@@ -237,6 +280,8 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     watershed_dir = PLOT_DIR / f"{input_csv.stem}_watershed_pourpoint"
     watershed_dir.mkdir(parents=True, exist_ok=True)
+    subbasins_dir = PLOT_DIR / f"{input_csv.stem}_subbasins_pourpoint"
+    subbasins_dir.mkdir(parents=True, exist_ok=True)
     river_network_dir = PLOT_DIR / f"{input_csv.stem}_river_network_pourpoint"
     river_network_dir.mkdir(parents=True, exist_ok=True)
     output_csv = OUTPUT_DIR / f"{input_csv.stem}_Pourpoint.csv"
@@ -244,6 +289,7 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
 
     print(f" → Input CSV       : {input_csv}")
     print(f" → Watershed GPKGs : {watershed_dir}")
+    print(f" → Sub-basin GPKGs : {subbasins_dir}")
     print(f" → River net GPKGs : {river_network_dir}")
     print(f" → Output CSV      : {output_csv}\n")
 
@@ -280,10 +326,12 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
         dam_id, dam_name = row["Dam ID"], row["Dam name"]
         watershed_path = watershed_dir / f"{_dam_id_safe(dam_id)}_Watershed.gpkg"
 
+        subbasins_path = subbasins_dir / f"{_dam_id_safe(dam_id)}_SubBasins.gpkg"
         river_network_path = river_network_dir / f"{_dam_id_safe(dam_id)}_RiverNetwork.gpkg"
 
         if overwrite:
             watershed_path.unlink(missing_ok=True)
+            subbasins_path.unlink(missing_ok=True)
             river_network_path.unlink(missing_ok=True)
 
         if watershed_path.exists():
@@ -295,7 +343,7 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
 
         t0 = time.monotonic()
         try:
-            result = engine.delineate(lat=row["Latitude"], lon=row["Longitude"])
+            result, subbasins = delineate_staged(engine, row["Latitude"], row["Longitude"])
             geom = shapely.from_wkb(result.geometry_wkb)
             watershed_gdf = gpd.GeoDataFrame(
                 {"Dam_ID": [dam_id], "Dam_name": [dam_name],
@@ -304,7 +352,10 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
             )
             network = upstream_river_network(engine, result)
             network.insert(0, "Dam_ID", dam_id)
-            # Watershed is written last: its existence marks the dam as done.
+            subbasins.insert(0, "Dam_ID", dam_id)
+            # Sub-basins (pre-merge) first; the watershed is written last, so its
+            # existence marks the dam as done.
+            subbasins.to_file(subbasins_path, driver="GPKG", layer="SubBasins")
             network.to_file(river_network_path, driver="GPKG", layer="UpstreamRiverNetwork")
             watershed_gdf.to_file(watershed_path, driver="GPKG", layer="Watershed")
 
@@ -313,7 +364,7 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
 
             lon_s, lat_s = result.resolved_outlet
             print(f" ✓ {dam_id} ({dam_name}) — {len(result.upstream_unit_ids)} unit(s), "
-                  f"{len(network)} reach(es), area={result.area_km2:.2f} km²")
+                  f"{len(subbasins)} sub-basin(s), {len(network)} reach(es), area={result.area_km2:.2f} km²")
             n_processed += 1
             diag_by_dam[dam_id] = {
                 "Dam ID": dam_id, "Dam name": dam_name, "status": "OK",
@@ -341,8 +392,11 @@ def run_batch(csv_path=None, radius_m=None, overwrite=False):
     print(f"✓ Saved CSV         : {output_csv}")
     print(f"✓ Saved diagnostics : {diag_csv}")
     print(f"✓ Watershed GPKGs in: {watershed_dir}")
+    print(f"✓ Sub-basin GPKGs in: {subbasins_dir}")
     print(f"✓ River net GPKGs in: {river_network_dir}\n")
 
+    merge_gpkgs(subbasins_dir, "*_SubBasins.gpkg", "SubBasins",
+                subbasins_dir / f"{input_csv.stem}_subbasins_merged.gpkg")
     merge_gpkgs(watershed_dir, "*_Watershed.gpkg", "Watershed",
                 watershed_dir / f"{input_csv.stem}_watershed_merged.gpkg")
     merge_gpkgs(river_network_dir, "*_RiverNetwork.gpkg", "UpstreamRiverNetwork",
