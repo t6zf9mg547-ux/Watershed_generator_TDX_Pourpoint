@@ -46,9 +46,17 @@ GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
               <same folders>/<input_filename>_watershed_merged.gpkg and
               <input_filename>_river_network_merged.gpkg
 
+Re-running
+----------
+By default dams that already have results are skipped (and their Area_km2
+is read back into the output CSV). --overwrite (or answering Yes to the
+dialog prompt) recomputes every dam, replacing the output CSV, diagnostics,
+per-dam GPKGs and merged GPKGs. A dam that fails on an overwrite run has its
+old per-dam files removed so stale results never reach the merged files.
+
 Single-point test (no CSV, no dialogs)
 --------------------------------------
-uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M]
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M] [--overwrite]
 uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
 Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson
 and Plot/test_river_network_pourpoint.geojson
@@ -59,7 +67,7 @@ import os
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, simpledialog
+from tkinter import filedialog, messagebox, simpledialog
 
 import boto3
 import geopandas as gpd
@@ -191,7 +199,7 @@ def run_test(lat, lon, radius_m):
 
 # ── CSV batch mode ─────────────────────────────────────────────────────────────
 
-def run_batch(csv_path=None, radius_m=None):
+def run_batch(csv_path=None, radius_m=None, overwrite=False):
     if csv_path is None:
         root = tk.Tk()
         root.withdraw()
@@ -210,10 +218,18 @@ def run_batch(csv_path=None, radius_m=None):
             initialvalue=DEFAULT_SEARCH_RADIUS_M,
             minvalue=1,
         )
-        root.destroy()
         if radius_m is None:
             radius_m = DEFAULT_SEARCH_RADIUS_M
             print(f" (no value entered — using default {DEFAULT_SEARCH_RADIUS_M} m)\n")
+        existing = PLOT_DIR / f"{Path(input_csv_str).stem}_watershed_pourpoint"
+        if any(existing.glob("*_Watershed.gpkg")):
+            overwrite = messagebox.askyesno(
+                title="Existing results",
+                message="Results already exist for this CSV.\n\n"
+                        "Yes = overwrite them (recompute every dam)\n"
+                        "No = keep them and only process missing dams",
+            )
+        root.destroy()
     else:
         input_csv_str = csv_path
 
@@ -253,7 +269,9 @@ def run_batch(csv_path=None, radius_m=None):
 
     # Reruns keep earlier diagnostics (replaced per Dam ID as dams are retried)
     diag_by_dam = {}
-    if diag_csv.exists():
+    if overwrite:
+        print(" → overwrite mode: recomputing every dam\n")
+    elif diag_csv.exists():
         for rec in pd.read_csv(diag_csv).to_dict("records"):
             diag_by_dam[rec["Dam ID"]] = {k: v for k, v in rec.items() if pd.notna(v)}
     n_processed = n_skipped = 0
@@ -263,6 +281,10 @@ def run_batch(csv_path=None, radius_m=None):
         watershed_path = watershed_dir / f"{_dam_id_safe(dam_id)}_Watershed.gpkg"
 
         river_network_path = river_network_dir / f"{_dam_id_safe(dam_id)}_RiverNetwork.gpkg"
+
+        if overwrite:
+            watershed_path.unlink(missing_ok=True)
+            river_network_path.unlink(missing_ok=True)
 
         if watershed_path.exists():
             if pd.isna(dams_df.at[i, "Area_km2"]):
@@ -332,10 +354,12 @@ if __name__ == "__main__":
     parser.add_argument("--test", nargs=2, type=float, metavar=("LAT", "LON"),
                         help="delineate one point and exit (no CSV / dialogs)")
     parser.add_argument("--csv", help="run the batch on this CSV, skipping the file/radius dialogs")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="with --csv: recompute every dam, replacing existing results")
     parser.add_argument("--radius", type=float, default=DEFAULT_SEARCH_RADIUS_M,
                         help="snap radius in metres for --test/--csv (default %(default)s)")
     args = parser.parse_args()
     if args.test:
         run_test(args.test[0], args.test[1], args.radius)
     else:
-        run_batch(args.csv, args.radius)
+        run_batch(args.csv, args.radius, args.overwrite)

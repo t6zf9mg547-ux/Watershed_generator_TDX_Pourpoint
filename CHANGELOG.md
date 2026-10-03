@@ -15,6 +15,8 @@ conventions and [Semantic Versioning](https://semver.org/).
   GPKGs combined (with `Dam_ID`), rebuilt at the end of every run.
 - `--csv` non-interactive mode; reruns now keep earlier diagnostics and refill
   `Area_km2` for already-processed dams.
+- Overwrite mode for reruns: `--overwrite` flag, or a Yes/No prompt in dialog mode
+  when results already exist; recomputes every dam and removes stale per-dam files.
 - Closest-feature (`distance-first`) outlet snapping.
 - mnema memory scaffolding: per-project store at `Resources/.mnema`, plus
   `doctrine` and `library` read-only vaults. See `CLAUDE.md` → "Memory
