@@ -2,6 +2,32 @@
 
 Guidance for Claude Code when working in a project started from this template.
 
+## This project
+
+`Watershed_generator_TDX_Pourpoint` — vector watershed delineation for dam
+outlets with the [pourpoint](https://github.com/CooperBigFoot/pourpoint)
+engine (staged API) on the TDX-Hydro HFX dataset on S3 (Hetzner). Everything
+lives in `Module/ExtractWatershedPourpoint.py`; its docstring and `README.md`
+→ "Input and outputs" describe inputs, outputs and modes.
+
+- The dataset has **no D8 raster**, so the engine runs with `refine=False`;
+  results are whole drainage units. Snapping is `distance-first` (closest
+  stream reach, default radius 1000 m).
+- **Credentials:** AWS profile `pourpoint-hfx` in `~/.aws`. Never put keys
+  in code, docs, logs or chat, and never ask the user to paste the secret
+  key — they enter it locally (`RUN_COMMANDS.md` → "S3 credentials").
+  pourpoint's S3 layer reads `AWS_*` env vars, not `~/.aws`, so the script
+  resolves the profile with boto3 and exports it in-process.
+- **Outputs per dam** (separate GPKGs under `Plot/`): sub-basins (saved from
+  the staged `pre_merge_units` step before `dissolve`), watershed, upstream
+  river network; each also merged into `<name>_*_merged.gpkg`. The watershed
+  file is written last and marks a dam as done.
+- Run commands from the project folder; reruns skip finished dams unless
+  `--overwrite`. Do not copy files from the older `Watershed_generator_TDX`
+  project (it was only a reference for the logic).
+- Keep `RUN_COMMANDS.md`, `README.md` and the script docstring in sync when
+  options or outputs change.
+
 ## Package management
 
 - **uv only.** Never use `pip`, `pip install`, `conda`, or `python -m venv` directly.

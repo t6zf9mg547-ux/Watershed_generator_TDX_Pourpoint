@@ -4,9 +4,41 @@ Vector watershed delineation for dam outlets using the
 [pourpoint](https://github.com/CooperBigFoot/pourpoint) engine against the
 TDX-Hydro HFX dataset hosted on S3 (Hetzner object storage). The dataset has
 no D8 raster auxiliary, so results are whole-drainage-unit (vector) watersheds.
+Outlets snap to the closest stream reach (default radius 1000 m).
 
-- `Module/ExtractWatershedPourpoint.py` — CSV batch mode (file picker) or
-  `--test LAT LON` single-point mode. See the script docstring.
+- `Module/ExtractWatershedPourpoint.py` — three ways to run it (see
+  `RUN_COMMANDS.md` for the commands):
+  - no arguments: file picker + radius dialog (asks whether to overwrite
+    existing results);
+  - `--csv Data/file.csv [--radius M] [--overwrite]`: non-interactive batch;
+  - `--test LAT LON [--radius M]`: single point, saves GeoJSON to `Plot/`.
+
+## Input and outputs
+
+Input CSV (in `Data/`): `Dam ID, Dam name, Latitude, Longitude[, Area_km2]`.
+
+For input `<name>.csv`, each dam gets three GeoPackages — one file per
+layer type, each with a single layer — plus one merged file per type:
+
+| Output | Per dam | Merged (all dams) |
+|---|---|---|
+| Sub-basins (whole drainage units, saved via pourpoint's staged API *before* the merge) | `Plot/<name>_subbasins_pourpoint/<Dam_ID>_SubBasins.gpkg` | `<name>_subbasins_merged.gpkg` |
+| Watershed (dissolve of the sub-basins) | `Plot/<name>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg` | `<name>_watershed_merged.gpkg` |
+| Upstream river network (TDX stream reaches in the watershed) | `Plot/<name>_river_network_pourpoint/<Dam_ID>_RiverNetwork.gpkg` | `<name>_river_network_merged.gpkg` |
+
+Merged files sit in the same folder as the per-dam files, carry a `Dam_ID`
+column, and are rebuilt at the end of every run. `Output/<name>_Pourpoint.csv`
+is the input with `Area_km2` filled only where it was empty, and
+`Output/<name>_Pourpoint_diagnostics.csv` has one row per dam (status, area,
+terminal unit, snap point, or the failure reason).
+
+Notes:
+- The sub-basin union differs from the watershed by a negligible sliver area
+  (pourpoint's dissolve fills tiny gaps between adjacent units).
+- The river network comes from the dataset's native "stems" snap layer,
+  filtered to the watershed's upstream unit IDs.
+- By default reruns skip dams that already have results; `--overwrite`
+  recomputes everything.
 
 ## S3 credentials
 

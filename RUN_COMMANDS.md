@@ -13,11 +13,33 @@ Creates `.venv` and installs everything listed in `pyproject.toml`.
 
 ## Running a script
 
+Always run from this project's folder (`cd ~/MyProjects/MyPython/Watershed_generator_TDX_Pourpoint`),
+otherwise `Module/...` won't be found.
+
 ```bash
-uv run python Module/your_script.py
+uv run python Module/ExtractWatershedPourpoint.py
 ```
-Replace `your_script.py` with whatever script you're running. Any
-script under `Module/` can be run this way.
+Opens a file picker (starts in `Data/`) and a snap-radius dialog; if results
+already exist for the chosen CSV it asks whether to overwrite them.
+
+Non-interactive batch (no dialogs):
+```bash
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/Morocco.csv
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/Morocco.csv --radius 3000
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/Morocco.csv --overwrite
+```
+`--radius` is the snap search radius in metres (default 1000). Without
+`--overwrite`, dams that already have results are skipped; with it, every
+dam is recomputed and all outputs replaced.
+
+Single-point test (prints area/terminal unit, saves GeoJSON to `Plot/`):
+```bash
+uv run python Module/ExtractWatershedPourpoint.py --test 47.3769 8.5417
+```
+
+Outputs per CSV `<name>`: sub-basin, watershed and river-network GPKGs per
+dam plus `*_merged.gpkg` for each, under `Plot/`; the CSV and diagnostics
+under `Output/`. See `README.md` → "Input and outputs".
 
 ## Managing dependencies
 
@@ -56,13 +78,15 @@ aws configure set aws_access_key_id 2ZWQNKOJF9107MLQSZI0 --profile pourpoint-hfx
 Secret key — run in YOUR terminal; input is hidden and never enters shell
 history, `ps`, or chat (zsh builtins only):
 ```bash
-read -s "SK?Secret key: "; echo; printf '\naws_secret_access_key = %s\n' "$SK" >> ~/.aws/credentials; unset SK; chmod 600 ~/.aws/credentials
+read -s "SK?Secret key: "; echo; printf 'aws_secret_access_key = %s\n' "$SK" >> ~/.aws/credentials; unset SK; chmod 600 ~/.aws/credentials
 ```
 
-Test (single outlet, no dialogs):
-```bash
-uv run python Module/ExtractWatershedPourpoint.py --test 47.3769 8.5417
-```
+Run the secret-key command **once**: it appends, and a duplicated
+`aws_secret_access_key` line makes botocore fail with "Unable to parse
+config file". If that happens, delete the extra line from
+`~/.aws/credentials`.
+
+Then test with the single-point command under "Running a script".
 
 ## Versioning and releases
 

@@ -20,6 +20,8 @@ conventions and [Semantic Versioning](https://semver.org/).
 - Delineation now runs through pourpoint's staged API; the pre-merge sub-basins
   are saved per dam (`<name>_subbasins_pourpoint/<Dam_ID>_SubBasins.gpkg`, plus a
   merged file) before `dissolve()` produces the watershed.
+- Documentation updated (script docstring, README, RUN_COMMANDS, CLAUDE.md) for the
+  staged-API sub-basin output, merged files, `--csv`/`--overwrite` and run-from-project-folder note.
 - Closest-feature (`distance-first`) outlet snapping.
 - mnema memory scaffolding: per-project store at `Resources/.mnema`, plus
   `doctrine` and `library` read-only vaults. See `CLAUDE.md` → "Memory

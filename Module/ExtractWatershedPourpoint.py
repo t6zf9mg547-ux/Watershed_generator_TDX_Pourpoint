@@ -41,8 +41,18 @@ and exported into this process's environment only (never printed).
 
 Inputs
 ------
-CSV : selected via file picker (opens in Data/). Required columns:
-      Dam ID, Dam name, Latitude, Longitude. Area_km2 optional.
+CSV : selected via file picker (opens in Data/), or passed with --csv.
+      Required columns: Dam ID, Dam name, Latitude, Longitude.
+      Area_km2 optional. UTF-8 with or without BOM.
+Snap radius : default 1000 m; asked in the dialog, or --radius. Outlets are
+      snapped to the CLOSEST stream reach ("distance-first" strategy);
+      dams with no reach within the radius are skipped (see diagnostics).
+
+Usage (run from this project's folder)
+--------------------------------------
+uv run python Module/ExtractWatershedPourpoint.py                  # dialogs
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M] [--overwrite]
+uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
 
 Output
 ------
@@ -60,15 +70,16 @@ Re-running
 By default dams that already have results are skipped (and their Area_km2
 is read back into the output CSV). --overwrite (or answering Yes to the
 dialog prompt) recomputes every dam, replacing the output CSV, diagnostics,
-per-dam GPKGs (sub-basins, watershed, river network) and merged GPKGs. A dam that fails on an overwrite run has its
-old per-dam files removed so stale results never reach the merged files.
+per-dam GPKGs (sub-basins, watershed, river network) and merged GPKGs.
+A dam that fails on an overwrite run has its old per-dam files removed so
+stale results never reach the merged files.
 
-Single-point test (no CSV, no dialogs)
---------------------------------------
-uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M] [--overwrite]
-uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
-Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson,
-Plot/test_subbasins_pourpoint.geojson and Plot/test_river_network_pourpoint.geojson
+Single-point test (--test, no CSV, no dialogs)
+----------------------------------------------
+Prints area, terminal unit and snap details, and saves
+Plot/test_watershed_pourpoint.geojson, Plot/test_subbasins_pourpoint.geojson
+and Plot/test_river_network_pourpoint.geojson. Also reports the (tiny)
+difference between the sub-basin union and the dissolved watershed.
 """
 
 import argparse
