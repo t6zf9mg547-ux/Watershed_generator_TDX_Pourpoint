@@ -11,6 +11,10 @@ conventions and [Semantic Versioning](https://semver.org/).
   credentials via AWS profile `pourpoint-hfx`.
 - Upstream river-network GPKG per dam, built from the dataset's native
   `stems` snap layer filtered to the watershed's upstream unit IDs.
+- `<name>_watershed_merged.gpkg` / `<name>_river_network_merged.gpkg`: all per-dam
+  GPKGs combined (with `Dam_ID`), rebuilt at the end of every run.
+- `--csv` non-interactive mode; reruns now keep earlier diagnostics and refill
+  `Area_km2` for already-processed dams.
 - Closest-feature (`distance-first`) outlet snapping.
 - mnema memory scaffolding: per-project store at `Resources/.mnema`, plus
   `doctrine` and `library` read-only vaults. See `CLAUDE.md` → "Memory

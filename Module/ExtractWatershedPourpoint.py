@@ -18,7 +18,10 @@ Outputs
      watershed (outlet reach included), saved as GeoPackage. Taken from the
      dataset's native "stems" snap layer, filtered to the watershed's
      upstream unit IDs; 'drain_km2' is the reach's inclusive drainage area.
-  3. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
+  3. Merged GeoPackages combining every per-dam file (rebuilt at the end of
+     each run): <input_filename>_watershed_merged.gpkg and
+     <input_filename>_river_network_merged.gpkg, with a Dam_ID column.
+  4. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
      Existing values are left untouched so results from multiple datasets
      can be compared side by side in the same CSV.
 
@@ -40,6 +43,8 @@ CSV         : Output/<input_filename>_Pourpoint.csv
 Diagnostics : Output/<input_filename>_Pourpoint_diagnostics.csv
 GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
               Plot/<input_filename>_river_network_pourpoint/<Dam_ID>_RiverNetwork.gpkg
+              <same folders>/<input_filename>_watershed_merged.gpkg and
+              <input_filename>_river_network_merged.gpkg
 
 Single-point test (no CSV, no dialogs)
 --------------------------------------
@@ -143,6 +148,22 @@ def upstream_river_network(engine, result):
     )
 
 
+def merge_gpkgs(folder, pattern, layer, out_path):
+    """Concatenate every per-dam GPKG matching pattern into one GPKG."""
+    frames = []
+    for f in sorted(folder.glob(pattern)):
+        gdf = gpd.read_file(f, layer=layer)
+        if "Dam_ID" not in gdf.columns:  # per-dam networks written before Dam_ID was added
+            gdf.insert(0, "Dam_ID", f.stem.rsplit("_", 1)[0])
+        frames.append(gdf)
+    if not frames:
+        print(f" ! nothing to merge in {folder}")
+        return
+    merged = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs="EPSG:4326")
+    merged.to_file(out_path, driver="GPKG", layer=layer)
+    print(f"✓ Merged {len(frames)} file(s), {len(merged)} feature(s) → {out_path}")
+
+
 # ── Single-point test mode ─────────────────────────────────────────────────────
 
 def run_test(lat, lon, radius_m):
@@ -230,7 +251,11 @@ def run_batch(csv_path=None, radius_m=None):
     configure_s3()
     engine = open_engine(radius_m)
 
-    diagnostics = []
+    # Reruns keep earlier diagnostics (replaced per Dam ID as dams are retried)
+    diag_by_dam = {}
+    if diag_csv.exists():
+        for rec in pd.read_csv(diag_csv).to_dict("records"):
+            diag_by_dam[rec["Dam ID"]] = {k: v for k, v in rec.items() if pd.notna(v)}
     n_processed = n_skipped = 0
 
     for i, row in dams_df.iterrows():
@@ -240,6 +265,9 @@ def run_batch(csv_path=None, radius_m=None):
         river_network_path = river_network_dir / f"{_dam_id_safe(dam_id)}_RiverNetwork.gpkg"
 
         if watershed_path.exists():
+            if pd.isna(dams_df.at[i, "Area_km2"]):
+                prev = gpd.read_file(watershed_path, layer="Watershed")
+                dams_df.at[i, "Area_km2"] = prev["Area_km2"].iloc[0]
             print(f" • {dam_id} ({dam_name}) — already processed, skipping")
             continue
 
@@ -253,6 +281,7 @@ def run_batch(csv_path=None, radius_m=None):
                 geometry=[geom], crs="EPSG:4326",
             )
             network = upstream_river_network(engine, result)
+            network.insert(0, "Dam_ID", dam_id)
             # Watershed is written last: its existence marks the dam as done.
             network.to_file(river_network_path, driver="GPKG", layer="UpstreamRiverNetwork")
             watershed_gdf.to_file(watershed_path, driver="GPKG", layer="Watershed")
@@ -264,7 +293,7 @@ def run_batch(csv_path=None, radius_m=None):
             print(f" ✓ {dam_id} ({dam_name}) — {len(result.upstream_unit_ids)} unit(s), "
                   f"{len(network)} reach(es), area={result.area_km2:.2f} km²")
             n_processed += 1
-            diagnostics.append({
+            diag_by_dam[dam_id] = {
                 "Dam ID": dam_id, "Dam name": dam_name, "status": "OK",
                 "computed_area_km2": round(result.area_km2, 2),
                 "terminal_unit_id": result.terminal_unit_id,
@@ -273,24 +302,29 @@ def run_batch(csv_path=None, radius_m=None):
                 "resolution_method": result.resolution_method,
                 "snapped_lon": lon_s, "snapped_lat": lat_s,
                 "duration_s": round(time.monotonic() - t0, 1),
-            })
+            }
         except pourpoint.PourpointError as e:
             print(f" ✗ {dam_id} ({dam_name}) — {type(e).__name__}: {e}")
             n_skipped += 1
-            diagnostics.append({"Dam ID": dam_id, "Dam name": dam_name,
-                                "status": "FAILED", "reason": f"{type(e).__name__}: {e}"})
+            diag_by_dam[dam_id] = {"Dam ID": dam_id, "Dam name": dam_name,
+                                   "status": "FAILED", "reason": f"{type(e).__name__}: {e}"}
 
         if (n_processed + n_skipped) % SAVE_EVERY == 0:
             dams_df.to_csv(output_csv, index=False)
-            pd.DataFrame(diagnostics).to_csv(diag_csv, index=False)
+            pd.DataFrame(list(diag_by_dam.values())).to_csv(diag_csv, index=False)
 
     print(f"\nProcessing complete: {n_processed} processed, {n_skipped} skipped\n")
     dams_df.to_csv(output_csv, index=False)
-    pd.DataFrame(diagnostics).to_csv(diag_csv, index=False)
+    pd.DataFrame(list(diag_by_dam.values())).to_csv(diag_csv, index=False)
     print(f"✓ Saved CSV         : {output_csv}")
     print(f"✓ Saved diagnostics : {diag_csv}")
     print(f"✓ Watershed GPKGs in: {watershed_dir}")
-    print(f"✓ River net GPKGs in: {river_network_dir}")
+    print(f"✓ River net GPKGs in: {river_network_dir}\n")
+
+    merge_gpkgs(watershed_dir, "*_Watershed.gpkg", "Watershed",
+                watershed_dir / f"{input_csv.stem}_watershed_merged.gpkg")
+    merge_gpkgs(river_network_dir, "*_RiverNetwork.gpkg", "UpstreamRiverNetwork",
+                river_network_dir / f"{input_csv.stem}_river_network_merged.gpkg")
 
 
 if __name__ == "__main__":
