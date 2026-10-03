@@ -43,6 +43,7 @@ GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
 
 Single-point test (no CSV, no dialogs)
 --------------------------------------
+uv run python Module/ExtractWatershedPourpoint.py --csv Data/file.csv [--radius M]
 uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
 Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson
 and Plot/test_river_network_pourpoint.geojson
@@ -169,28 +170,31 @@ def run_test(lat, lon, radius_m):
 
 # ── CSV batch mode ─────────────────────────────────────────────────────────────
 
-def run_batch():
-    root = tk.Tk()
-    root.withdraw()
-    input_csv_str = filedialog.askopenfilename(
-        title="Select dam coordinates CSV",
-        initialdir=DATA_DIR,
-        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-    )
-    if not input_csv_str:
+def run_batch(csv_path=None, radius_m=None):
+    if csv_path is None:
+        root = tk.Tk()
+        root.withdraw()
+        input_csv_str = filedialog.askopenfilename(
+            title="Select dam coordinates CSV",
+            initialdir=DATA_DIR,
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not input_csv_str:
+            root.destroy()
+            raise SystemExit("No CSV file selected — exiting.")
+        radius_m = simpledialog.askfloat(
+            title="Search radius",
+            prompt="Snap search radius, in meters (dams beyond this distance from\n"
+                   "the nearest stream will be skipped):",
+            initialvalue=DEFAULT_SEARCH_RADIUS_M,
+            minvalue=1,
+        )
         root.destroy()
-        raise SystemExit("No CSV file selected — exiting.")
-    radius_m = simpledialog.askfloat(
-        title="Search radius",
-        prompt="Snap search radius, in meters (dams beyond this distance from\n"
-               "the nearest stream will be skipped):",
-        initialvalue=DEFAULT_SEARCH_RADIUS_M,
-        minvalue=1,
-    )
-    root.destroy()
-    if radius_m is None:
-        radius_m = DEFAULT_SEARCH_RADIUS_M
-        print(f" (no value entered — using default {DEFAULT_SEARCH_RADIUS_M} m)\n")
+        if radius_m is None:
+            radius_m = DEFAULT_SEARCH_RADIUS_M
+            print(f" (no value entered — using default {DEFAULT_SEARCH_RADIUS_M} m)\n")
+    else:
+        input_csv_str = csv_path
 
     input_csv = Path(input_csv_str).expanduser().resolve()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -206,7 +210,7 @@ def run_batch():
     print(f" → River net GPKGs : {river_network_dir}")
     print(f" → Output CSV      : {output_csv}\n")
 
-    dams_df = pd.read_csv(input_csv)
+    dams_df = pd.read_csv(input_csv, encoding="utf-8-sig")
     required_cols = {"Dam ID", "Dam name", "Latitude", "Longitude"}
     missing = required_cols - set(dams_df.columns)
     if missing:
@@ -293,10 +297,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pourpoint watershed delineation (TDX HFX)")
     parser.add_argument("--test", nargs=2, type=float, metavar=("LAT", "LON"),
                         help="delineate one point and exit (no CSV / dialogs)")
+    parser.add_argument("--csv", help="run the batch on this CSV, skipping the file/radius dialogs")
     parser.add_argument("--radius", type=float, default=DEFAULT_SEARCH_RADIUS_M,
-                        help="snap radius in metres for --test (default %(default)s)")
+                        help="snap radius in metres for --test/--csv (default %(default)s)")
     args = parser.parse_args()
     if args.test:
         run_test(args.test[0], args.test[1], args.radius)
     else:
-        run_batch()
+        run_batch(args.csv, args.radius)
