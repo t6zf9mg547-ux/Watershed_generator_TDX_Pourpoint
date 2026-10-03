@@ -1,0 +1,275 @@
+"""
+Watershed Delineation — TDX-Hydro HFX dataset via pourpoint
+============================================================
+For each dam in the input CSV, delineates the upstream watershed with the
+pourpoint engine against the remote TDX-Hydro HFX dataset on S3 (Hetzner
+object storage). pourpoint snaps the outlet to the dataset's declared snap
+features, traverses the upstream graph and returns the dissolved watershed.
+
+This dataset has NO D8 raster auxiliary, so refinement is disabled: the
+result is always the whole terminal drainage unit plus every upstream unit
+(vector delineation only).
+
+Outputs
+-------
+  1. Watershed polygon per dam, saved as GeoPackage.
+  2. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
+     Existing values are left untouched so results from multiple datasets
+     can be compared side by side in the same CSV.
+
+Not produced (vs. ExtractWatershedTDX.py): upstream river-network GPKGs.
+HFX snap features are not a routable river network, and pourpoint does not
+return stream segments.
+
+Credentials
+-----------
+Read from the local AWS profile PROFILE_NAME (~/.aws/credentials). Nothing
+secret lives in this file. pourpoint's S3 layer reads AWS_* environment
+variables rather than ~/.aws files, so the profile is resolved with boto3
+and exported into this process's environment only (never printed).
+
+Inputs
+------
+CSV : selected via file picker (opens in Data/). Required columns:
+      Dam ID, Dam name, Latitude, Longitude. Area_km2 optional.
+
+Output
+------
+CSV         : Output/<input_filename>_Pourpoint.csv
+Diagnostics : Output/<input_filename>_Pourpoint_diagnostics.csv
+GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
+
+Single-point test (no CSV, no dialogs)
+--------------------------------------
+uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
+Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson
+"""
+
+import argparse
+import os
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, simpledialog
+
+import boto3
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import pourpoint
+import shapely
+from botocore.exceptions import ProfileNotFound
+
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_DIR / "Data"
+OUTPUT_DIR = PROJECT_DIR / "Output"
+PLOT_DIR = PROJECT_DIR / "Plot"
+
+DATASET = (
+    "s3://pourpoint-hfx/hfx/"
+    "tdx-hydro-nga-20230126-global-62basin-corrected-hfx-0.3.0-d4d4c5e28df7/"
+)
+ENDPOINT = "https://fsn1.your-objectstorage.com"
+REGION = "fsn1"
+PROFILE_NAME = "pourpoint-hfx"
+
+# Default snap search radius (m) — overridden interactively / via --radius
+DEFAULT_SEARCH_RADIUS_M = 1000
+
+# Progressive save interval (dams)
+SAVE_EVERY = 10
+
+
+# ── S3 configuration ───────────────────────────────────────────────────────────
+
+def configure_s3():
+    """Resolve the AWS profile and export it for pourpoint's object_store."""
+    try:
+        creds = boto3.Session(profile_name=PROFILE_NAME).get_credentials()
+    except ProfileNotFound:
+        raise SystemExit(
+            f"AWS profile '{PROFILE_NAME}' not found in ~/.aws. "
+            f"See README.md → 'S3 credentials' to create it."
+        )
+    if creds is None:
+        raise SystemExit(f"AWS profile '{PROFILE_NAME}' has no credentials.")
+    frozen = creds.get_frozen_credentials()
+    os.environ.update(
+        AWS_ACCESS_KEY_ID=frozen.access_key,
+        AWS_SECRET_ACCESS_KEY=frozen.secret_key,
+        AWS_ENDPOINT=ENDPOINT,
+        AWS_ENDPOINT_URL=ENDPOINT,
+        AWS_ENDPOINT_URL_S3=ENDPOINT,
+        AWS_REGION=REGION,
+        AWS_DEFAULT_REGION=REGION,
+        AWS_VIRTUAL_HOSTED_STYLE_REQUEST="false",  # path-style addressing
+    )
+    os.environ.pop("AWS_SESSION_TOKEN", None)
+    os.environ.setdefault("HFX_CACHE_DIR", str(PROJECT_DIR / "Resources" / "hfx-cache"))
+
+
+def open_engine(radius_m):
+    print(f"Opening pourpoint engine (closest-feature snap, radius = {radius_m} m, no D8 refinement) …")
+    t0 = time.monotonic()
+    engine = pourpoint.Engine(
+        DATASET,
+        snap_radius=float(radius_m),
+        snap_strategy="distance-first",
+        refine=False,
+        parquet_cache=True,
+    )
+    print(f" → engine open in {time.monotonic() - t0:.1f} s\n")
+    return engine
+
+
+def _dam_id_safe(dam_id):
+    return str(dam_id).replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+# ── Single-point test mode ─────────────────────────────────────────────────────
+
+def run_test(lat, lon, radius_m):
+    configure_s3()
+    engine = open_engine(radius_m)
+    t0 = time.monotonic()
+    result = engine.delineate(lat=lat, lon=lon)
+    print(f"Delineated in {time.monotonic() - t0:.1f} s")
+    print(f" area_km2          : {result.area_km2:.2f}")
+    print(f" terminal_unit_id  : {result.terminal_unit_id}")
+    print(f" upstream units    : {len(result.upstream_unit_ids)}")
+    print(f" resolution_method : {result.resolution_method}")
+    print(f" refinement seed   : {result.refinement_seed_kind}")
+    print(f" input (lon, lat)  : {result.input_outlet}")
+    print(f" snapped (lon, lat): {result.resolved_outlet}")
+    PLOT_DIR.mkdir(parents=True, exist_ok=True)
+    out = PLOT_DIR / "test_watershed_pourpoint.geojson"
+    out.write_text(result.to_geojson(), encoding="utf-8")
+    print(f" → saved {out}")
+
+
+# ── CSV batch mode ─────────────────────────────────────────────────────────────
+
+def run_batch():
+    root = tk.Tk()
+    root.withdraw()
+    input_csv_str = filedialog.askopenfilename(
+        title="Select dam coordinates CSV",
+        initialdir=DATA_DIR,
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+    )
+    if not input_csv_str:
+        root.destroy()
+        raise SystemExit("No CSV file selected — exiting.")
+    radius_m = simpledialog.askfloat(
+        title="Search radius",
+        prompt="Snap search radius, in meters (dams beyond this distance from\n"
+               "the nearest stream will be skipped):",
+        initialvalue=DEFAULT_SEARCH_RADIUS_M,
+        minvalue=1,
+    )
+    root.destroy()
+    if radius_m is None:
+        radius_m = DEFAULT_SEARCH_RADIUS_M
+        print(f" (no value entered — using default {DEFAULT_SEARCH_RADIUS_M} m)\n")
+
+    input_csv = Path(input_csv_str).expanduser().resolve()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    watershed_dir = PLOT_DIR / f"{input_csv.stem}_watershed_pourpoint"
+    watershed_dir.mkdir(parents=True, exist_ok=True)
+    output_csv = OUTPUT_DIR / f"{input_csv.stem}_Pourpoint.csv"
+    diag_csv = OUTPUT_DIR / f"{input_csv.stem}_Pourpoint_diagnostics.csv"
+
+    print(f" → Input CSV       : {input_csv}")
+    print(f" → Watershed GPKGs : {watershed_dir}")
+    print(f" → Output CSV      : {output_csv}\n")
+
+    dams_df = pd.read_csv(input_csv)
+    required_cols = {"Dam ID", "Dam name", "Latitude", "Longitude"}
+    missing = required_cols - set(dams_df.columns)
+    if missing:
+        raise SystemExit(f"Input CSV is missing required column(s): {missing}")
+    if "Area_km2" not in dams_df.columns:
+        dams_df["Area_km2"] = np.nan
+    for col in ("Latitude", "Longitude", "Area_km2"):
+        dams_df[col] = pd.to_numeric(dams_df[col], errors="coerce")
+
+    invalid = dams_df[dams_df["Latitude"].isna() | dams_df["Longitude"].isna()]
+    if not invalid.empty:
+        print(f" ! {len(invalid)} row(s) with invalid coordinates will be skipped:")
+        print(invalid[["Dam name", "Latitude", "Longitude"]])
+        dams_df = dams_df.dropna(subset=["Latitude", "Longitude"]).copy()
+    print(f" → {len(dams_df)} dams loaded\n")
+
+    configure_s3()
+    engine = open_engine(radius_m)
+
+    diagnostics = []
+    n_processed = n_skipped = 0
+
+    for i, row in dams_df.iterrows():
+        dam_id, dam_name = row["Dam ID"], row["Dam name"]
+        watershed_path = watershed_dir / f"{_dam_id_safe(dam_id)}_Watershed.gpkg"
+
+        if watershed_path.exists():
+            print(f" • {dam_id} ({dam_name}) — already processed, skipping")
+            continue
+
+        t0 = time.monotonic()
+        try:
+            result = engine.delineate(lat=row["Latitude"], lon=row["Longitude"])
+            geom = shapely.from_wkb(result.geometry_wkb)
+            watershed_gdf = gpd.GeoDataFrame(
+                {"Dam_ID": [dam_id], "Dam_name": [dam_name],
+                 "Area_km2": [round(result.area_km2, 2)]},
+                geometry=[geom], crs="EPSG:4326",
+            )
+            watershed_gdf.to_file(watershed_path, driver="GPKG", layer="Watershed")
+
+            if pd.isna(dams_df.at[i, "Area_km2"]):
+                dams_df.at[i, "Area_km2"] = round(result.area_km2, 2)
+
+            lon_s, lat_s = result.resolved_outlet
+            print(f" ✓ {dam_id} ({dam_name}) — {len(result.upstream_unit_ids)} unit(s), "
+                  f"area={result.area_km2:.2f} km²")
+            n_processed += 1
+            diagnostics.append({
+                "Dam ID": dam_id, "Dam name": dam_name, "status": "OK",
+                "computed_area_km2": round(result.area_km2, 2),
+                "terminal_unit_id": result.terminal_unit_id,
+                "n_upstream_units": len(result.upstream_unit_ids),
+                "resolution_method": result.resolution_method,
+                "snapped_lon": lon_s, "snapped_lat": lat_s,
+                "duration_s": round(time.monotonic() - t0, 1),
+            })
+        except pourpoint.PourpointError as e:
+            print(f" ✗ {dam_id} ({dam_name}) — {type(e).__name__}: {e}")
+            n_skipped += 1
+            diagnostics.append({"Dam ID": dam_id, "Dam name": dam_name,
+                                "status": "FAILED", "reason": f"{type(e).__name__}: {e}"})
+
+        if (n_processed + n_skipped) % SAVE_EVERY == 0:
+            dams_df.to_csv(output_csv, index=False)
+            pd.DataFrame(diagnostics).to_csv(diag_csv, index=False)
+
+    print(f"\nProcessing complete: {n_processed} processed, {n_skipped} skipped\n")
+    dams_df.to_csv(output_csv, index=False)
+    pd.DataFrame(diagnostics).to_csv(diag_csv, index=False)
+    print(f"✓ Saved CSV         : {output_csv}")
+    print(f"✓ Saved diagnostics : {diag_csv}")
+    print(f"✓ Watershed GPKGs in: {watershed_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Pourpoint watershed delineation (TDX HFX)")
+    parser.add_argument("--test", nargs=2, type=float, metavar=("LAT", "LON"),
+                        help="delineate one point and exit (no CSV / dialogs)")
+    parser.add_argument("--radius", type=float, default=DEFAULT_SEARCH_RADIUS_M,
+                        help="snap radius in metres for --test (default %(default)s)")
+    args = parser.parse_args()
+    if args.test:
+        run_test(args.test[0], args.test[1], args.radius)
+    else:
+        run_batch()
