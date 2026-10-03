@@ -12,14 +12,15 @@ result is always the whole terminal drainage unit plus every upstream unit
 
 Outputs
 -------
-  1. Watershed polygon per dam, saved as GeoPackage.
-  2. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
+  1. Watershed polygon per dam, saved as GeoPackage (its outline is the
+     watershed boundary line).
+  2. Upstream river network per dam — every TDX-Hydro stream reach in the
+     watershed (outlet reach included), saved as GeoPackage. Taken from the
+     dataset's native "stems" snap layer, filtered to the watershed's
+     upstream unit IDs; 'drain_km2' is the reach's inclusive drainage area.
+  3. Area_km2 in the output CSV — filled ONLY where currently empty/NaN.
      Existing values are left untouched so results from multiple datasets
      can be compared side by side in the same CSV.
-
-Not produced (vs. ExtractWatershedTDX.py): upstream river-network GPKGs.
-HFX snap features are not a routable river network, and pourpoint does not
-return stream segments.
 
 Credentials
 -----------
@@ -38,11 +39,13 @@ Output
 CSV         : Output/<input_filename>_Pourpoint.csv
 Diagnostics : Output/<input_filename>_Pourpoint_diagnostics.csv
 GPKG        : Plot/<input_filename>_watershed_pourpoint/<Dam_ID>_Watershed.gpkg
+              Plot/<input_filename>_river_network_pourpoint/<Dam_ID>_RiverNetwork.gpkg
 
 Single-point test (no CSV, no dialogs)
 --------------------------------------
 uv run python Module/ExtractWatershedPourpoint.py --test LAT LON [--radius M]
 Prints area and terminal unit, and saves Plot/test_watershed_pourpoint.geojson
+and Plot/test_river_network_pourpoint.geojson
 """
 
 import argparse
@@ -129,6 +132,16 @@ def _dam_id_safe(dam_id):
     return str(dam_id).replace("/", "_").replace("\\", "_").replace(":", "_")
 
 
+def upstream_river_network(engine, result):
+    """Stream reaches of the result's watershed, from the dataset's snap layer."""
+    targets = engine.snap_targets(bbox=result.geometry_bbox).to_geodataframe()
+    reaches = targets[targets["unit_id"].isin(set(result.upstream_unit_ids))]
+    return gpd.GeoDataFrame(
+        {"unit_id": reaches["unit_id"].values, "drain_km2": reaches["weight"].values},
+        geometry=reaches.geometry.values, crs="EPSG:4326",
+    )
+
+
 # ── Single-point test mode ─────────────────────────────────────────────────────
 
 def run_test(lat, lon, radius_m):
@@ -148,6 +161,10 @@ def run_test(lat, lon, radius_m):
     out = PLOT_DIR / "test_watershed_pourpoint.geojson"
     out.write_text(result.to_geojson(), encoding="utf-8")
     print(f" → saved {out}")
+    network = upstream_river_network(engine, result)
+    out = PLOT_DIR / "test_river_network_pourpoint.geojson"
+    network.to_file(out, driver="GeoJSON")
+    print(f" → saved {out} ({len(network)} reaches)")
 
 
 # ── CSV batch mode ─────────────────────────────────────────────────────────────
@@ -179,11 +196,14 @@ def run_batch():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     watershed_dir = PLOT_DIR / f"{input_csv.stem}_watershed_pourpoint"
     watershed_dir.mkdir(parents=True, exist_ok=True)
+    river_network_dir = PLOT_DIR / f"{input_csv.stem}_river_network_pourpoint"
+    river_network_dir.mkdir(parents=True, exist_ok=True)
     output_csv = OUTPUT_DIR / f"{input_csv.stem}_Pourpoint.csv"
     diag_csv = OUTPUT_DIR / f"{input_csv.stem}_Pourpoint_diagnostics.csv"
 
     print(f" → Input CSV       : {input_csv}")
     print(f" → Watershed GPKGs : {watershed_dir}")
+    print(f" → River net GPKGs : {river_network_dir}")
     print(f" → Output CSV      : {output_csv}\n")
 
     dams_df = pd.read_csv(input_csv)
@@ -213,6 +233,8 @@ def run_batch():
         dam_id, dam_name = row["Dam ID"], row["Dam name"]
         watershed_path = watershed_dir / f"{_dam_id_safe(dam_id)}_Watershed.gpkg"
 
+        river_network_path = river_network_dir / f"{_dam_id_safe(dam_id)}_RiverNetwork.gpkg"
+
         if watershed_path.exists():
             print(f" • {dam_id} ({dam_name}) — already processed, skipping")
             continue
@@ -226,6 +248,9 @@ def run_batch():
                  "Area_km2": [round(result.area_km2, 2)]},
                 geometry=[geom], crs="EPSG:4326",
             )
+            network = upstream_river_network(engine, result)
+            # Watershed is written last: its existence marks the dam as done.
+            network.to_file(river_network_path, driver="GPKG", layer="UpstreamRiverNetwork")
             watershed_gdf.to_file(watershed_path, driver="GPKG", layer="Watershed")
 
             if pd.isna(dams_df.at[i, "Area_km2"]):
@@ -233,13 +258,14 @@ def run_batch():
 
             lon_s, lat_s = result.resolved_outlet
             print(f" ✓ {dam_id} ({dam_name}) — {len(result.upstream_unit_ids)} unit(s), "
-                  f"area={result.area_km2:.2f} km²")
+                  f"{len(network)} reach(es), area={result.area_km2:.2f} km²")
             n_processed += 1
             diagnostics.append({
                 "Dam ID": dam_id, "Dam name": dam_name, "status": "OK",
                 "computed_area_km2": round(result.area_km2, 2),
                 "terminal_unit_id": result.terminal_unit_id,
                 "n_upstream_units": len(result.upstream_unit_ids),
+                "n_river_reaches": len(network),
                 "resolution_method": result.resolution_method,
                 "snapped_lon": lon_s, "snapped_lat": lat_s,
                 "duration_s": round(time.monotonic() - t0, 1),
@@ -260,6 +286,7 @@ def run_batch():
     print(f"✓ Saved CSV         : {output_csv}")
     print(f"✓ Saved diagnostics : {diag_csv}")
     print(f"✓ Watershed GPKGs in: {watershed_dir}")
+    print(f"✓ River net GPKGs in: {river_network_dir}")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,9 @@ conventions and [Semantic Versioning](https://semver.org/).
 - `Module/ExtractWatershedPourpoint.py`: pourpoint-based vector watershed
   delineation on the TDX-Hydro HFX S3 dataset (CSV batch + `--test` mode),
   credentials via AWS profile `pourpoint-hfx`.
+- Upstream river-network GPKG per dam, built from the dataset's native
+  `stems` snap layer filtered to the watershed's upstream unit IDs.
+- Closest-feature (`distance-first`) outlet snapping.
 - mnema memory scaffolding: per-project store at `Resources/.mnema`, plus
   `doctrine` and `library` read-only vaults. See `CLAUDE.md` → "Memory
   (mnema)" and `RUN_COMMANDS.md` → "Memory (mnema)".
