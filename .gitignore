@@ -58,3 +58,8 @@ Resources/.mnema/views.npz
 
 # pourpoint metadata cache
 /Resources/hfx-cache/
+
+# Local machine / personal tooling -- not for the public repo
+/CLAUDE.md
+/register-project.sh
+/mount-library.sh
